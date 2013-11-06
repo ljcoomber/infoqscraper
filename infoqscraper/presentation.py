@@ -191,6 +191,7 @@ class Downloader(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
         shutil.rmtree(self.tmp_dir)
 
+
     @property
     def tmp_dir(self):
         if not hasattr(self, "_tmp_dir"):
@@ -213,19 +214,36 @@ class Downloader(object):
 
         DownloadFailedException is raised if some resources cannot be fetched.
         """
-        try:
-            audio = self.download_mp3()
-        except client.DownloadError:
-            audio = self.download_video()
 
+        # TODO BEGIN CHANGES
+        print "Downloading video"
+        audio = self.download_video()
+
+        # TODO: Tidy up, add switch
+        #try:
+        #    #audio = self.download_mp3()
+        #    video = self.download_video()
+        #except client.DownloadError:
+
+        print "Downloading slides"
         raw_slides = self.download_slides()
 
         # Convert slides into JPG since ffmpeg does not support SWF
         jpg_slides = self._convert_slides(raw_slides)
         # Create one frame per second using the timecode information
         frame_pattern = self._prepare_frames(jpg_slides)
-        # Now Build the video file
-        output = self._assemble(audio, frame_pattern, output=output_path)
+
+        print "Assembling"
+        # TODO: Proper switch
+        embed_video = True
+        if embed_video:
+            # Convert the slides into a movie first...
+            slide_movie = self._convert_frames(frame_pattern)
+
+            # Now build the combined video
+            output = self._assemble_combined_video(audio, slide_movie, output=output_path)            
+        else:
+            output = self._assemble_slides_only(audio, frame_pattern, output=output_path)
 
         return output
 
@@ -317,7 +335,8 @@ class Downloader(object):
 
         return self.presentation.client.download(self.presentation.metadata['mp3'], dir, filename=filename)
 
-    def _assemble(self, audio, frame_pattern, output=None):
+    # TODO: Abstract ffmpeg invocation out
+    def _assemble_slides_only(self, audio, frame_pattern, output=None):
         if not output:
             output = os.path.join(self.tmp_dir, "output.avi")
 
@@ -340,6 +359,45 @@ class Downloader(object):
                 ]
             utils.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
+            raise Exception("Failed to create final movie as %s.\n"
+                            "\tExit code: %s\n"
+                            "\tOutput:\n%s"
+                            % (output, e.returncode, e.output))
+        return output
+
+    def _assemble_combined_video(self, main_video, slide_video, output=None):
+        if not output:
+            output = os.path.join(self.tmp_dir, "output.avi")
+
+
+        try:
+            # Try to be compatible as much as possible with old ffmpeg releases (>= 0.7)
+            #   - Do not use new syntax options
+            #   - Do not use libx264, not available on old Ubuntu/Debian
+            #   - Do not use -threads auto, not available on 0.8.*
+            #   - Old releases are very picky regarding arguments position
+            #
+            # 0.5 (Debian Squeeze & Ubuntu 10.4) is not supported because of
+            # scaling issues with image2.
+
+            # TODO: Line wrap, and quoting
+
+            print "Assembling combined video"
+
+            cmd = [
+                self.ffmpeg, "-loglevel", "verbose",
+                "-ab", "128k",
+                "-i", main_video,
+                "-acodec", "libmp3lame", "-ab", "128k",
+                "-vf",
+                "[in] scale=426:-1, pad=1280:720 [left]; movie=%s, scale=852:-1 [right]; [left][right] overlay=426:0 [out]" % slide_video,
+                "-s", "hd720", "-vb", "2M",
+                output
+            ]
+
+            utils.check_output(cmd, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            print ' '.join(cmd)
             raise Exception("Failed to create final movie as %s.\n"
                             "\tExit code: %s\n"
                             "\tOutput:\n%s"
@@ -382,6 +440,37 @@ class Downloader(object):
 
         return os.path.join(self.tmp_dir, "frame-%04d." +  ext)
 
+    def _convert_frames(self, frame_pattern, output=None):
+        print "Making slide video"
+
+        if not output:
+            output = os.path.join(self.tmp_dir, "slides.avi")
+
+        try:
+            # TODO: Verify the below
+            # Try to be compatible as much as possible with old ffmpeg releases (>= 0.7)
+            #   - Do not use new syntax options
+            #   - Do not use libx264, not available on old Ubuntu/Debian
+            #   - Do not use -threads auto, not available on 0.8.*
+            #   - Old releases are very picky regarding arguments position
+            #
+            # 0.5 (Debian Squeeze & Ubuntu 10.4) is not supported because of
+            # scaling issues with image2.
+            # TODO: This could probably be more efficient
+            # TODO: Combine with assemling video?
+            cmd = [
+                self.ffmpeg, "-f", "image2",
+                "-r", "1", "-s", "hd720",
+                "-i", frame_pattern, "-vcodec", "mpeg4",
+                output
+            ]
+            utils.check_output(cmd, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            raise Exception("Failed to create intermediate slide movie as %s.\n"
+                            "\tExit code: %s\n"
+                            "\tOutput:\n%s"
+                            % (output, e.returncode, e.output))
+        return output
 
 class _RightBarPage(object):
     """A page returned by /rightbar.action
